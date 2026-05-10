@@ -45,7 +45,7 @@ export default async function Home() {
   type AreaJoin = { nombre: string; tipo_contrato: string } | null;
 
   const initialLogs: LogEntry[] = (logsRaw ?? []).map((row) => {
-    const area = row.areas as AreaJoin;
+    const area = row.areas as unknown as AreaJoin;
     return {
       id:                  row.id as string,
       codigo_generado:     row.codigo_generado as string,

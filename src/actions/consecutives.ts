@@ -94,7 +94,7 @@ export async function getRecentLogs(limit = 50): Promise<LogEntry[]> {
   if (error || !data) return [];
 
   return data.map((row) => {
-    const area = row.areas as AreaRow;
+    const area = row.areas as unknown as AreaRow;
     return {
       id:                  row.id as string,
       codigo_generado:     row.codigo_generado as string,
