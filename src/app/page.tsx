@@ -62,6 +62,7 @@ export default async function Home() {
       areas={areas}
       initialLogs={initialLogs}
       initialLatest={initialLatest as LatestByArea[]}
+      excelUrl={process.env.EXCEL_SHAREPOINT_URL}
     />
   );
 }

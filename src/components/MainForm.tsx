@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState, useTransition } from 'react';
 import { generateConsecutive, deleteConsecutive, getLatestPerArea } from '@/actions/consecutives';
+import { appendConsecutiveToExcel } from '@/actions/excel';
 import { getBrowserClient } from '@/lib/supabase';
 import type { Area, LatestByArea, LogEntry } from '@/types';
 
@@ -69,11 +70,12 @@ interface Props {
   areas: Area[];
   initialLogs: LogEntry[];
   initialLatest: LatestByArea[];
+  excelUrl?: string;
 }
 
 // ── Componente ────────────────────────────────────────────
 
-export default function MainForm({ areas, initialLogs, initialLatest }: Props) {
+export default function MainForm({ areas, initialLogs, initialLatest, excelUrl }: Props) {
 
   // --- Formulario ---
   const [tipoContrato, setTipoContrato]   = useState('');
@@ -84,6 +86,11 @@ export default function MainForm({ areas, initialLogs, initialLatest }: Props) {
   const [copiedAreaId, setCopiedAreaId]           = useState<string | null>(null);
   const [errorMsg, setErrorMsg]                   = useState<string | null>(null);
   const [isPending, startTransition]      = useTransition();
+
+  // --- Excel ---
+  const [showConfirmModal, setShowConfirmModal] = useState(false);
+  const [excelStatus, setExcelStatus]           = useState<'idle' | 'pending' | 'ok' | 'error'>('idle');
+  const [excelError, setExcelError]             = useState<string | null>(null);
 
   // --- Grid ---
   const [logs, setLogs]             = useState<LogEntry[]>(initialLogs);
@@ -231,6 +238,17 @@ export default function MainForm({ areas, initialLogs, initialLatest }: Props) {
       return;
     }
     setErrorMsg(null);
+    if (excelUrl) {
+      setShowConfirmModal(true);
+    } else {
+      executeGenerate();
+    }
+  }
+
+  function executeGenerate() {
+    setShowConfirmModal(false);
+    setExcelStatus('idle');
+    setExcelError(null);
     startTransition(async () => {
       const result = await generateConsecutive(areaId, nombreUsuario);
       if (result.success && result.codigo && result.logEntry) {
@@ -244,6 +262,19 @@ export default function MainForm({ areas, initialLogs, initialLatest }: Props) {
         setTimeout(() => {
           setRecentlyUpdated(s => { const n = new Set(s); n.delete(areaId); return n; });
         }, 3000);
+
+        // Registrar en Excel y abrir pestaña
+        if (excelUrl) {
+          setExcelStatus('pending');
+          const exRes = await appendConsecutiveToExcel(result.codigo);
+          if (exRes.success) {
+            setExcelStatus('ok');
+            window.open(excelUrl, '_blank', 'noopener,noreferrer');
+          } else {
+            setExcelStatus('error');
+            setExcelError(exRes.error ?? 'No se pudo registrar en Excel.');
+          }
+        }
       } else {
         setErrorMsg(result.error ?? 'Error al generar el consecutivo.');
       }
@@ -431,6 +462,45 @@ export default function MainForm({ areas, initialLogs, initialLatest }: Props) {
                 </>
               )}
             </button>
+
+            {/* URL Excel (solo informativa) */}
+            {excelUrl && (
+              <div className="mt-3 flex items-center gap-2 rounded-lg bg-emerald-50 border border-emerald-200 px-3 py-2">
+                <svg className="w-3.5 h-3.5 text-emerald-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                    d="M9 17V7m0 10a2 2 0 01-2 2H5a2 2 0 01-2-2V7a2 2 0 012-2h2a2 2 0 012 2m0 10a2 2 0 002 2h2a2 2 0 002-2M9 7a2 2 0 012-2h2a2 2 0 012 2m0 0v10m0-10a2 2 0 012 2h2a2 2 0 012-2" />
+                </svg>
+                <p className="text-xs text-emerald-700 truncate flex-1" title={excelUrl}>
+                  <span className="font-medium">Excel:</span> {excelUrl}
+                </p>
+              </div>
+            )}
+
+            {/* Estado Excel */}
+            {excelStatus === 'pending' && (
+              <div className="mt-2 flex items-center gap-2 text-xs text-slate-500">
+                <IconSpinner /> Registrando en Excel…
+              </div>
+            )}
+            {excelStatus === 'ok' && (
+              <div className="mt-2 flex items-center gap-1.5 text-xs text-emerald-600">
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" />
+                </svg>
+                Consecutivo registrado en Excel.
+              </div>
+            )}
+            {excelStatus === 'error' && excelError && (
+              <div className="mt-2 flex items-start gap-1.5 text-xs text-amber-700 bg-amber-50
+                              border border-amber-200 rounded-lg px-3 py-2">
+                <svg className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+                  <path fillRule="evenodd"
+                    d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z"
+                    clipRule="evenodd" />
+                </svg>
+                <span><span className="font-medium">Excel:</span> {excelError}</span>
+              </div>
+            )}
           </div>
 
           {/* ── Panel: Últimos por área ── */}
@@ -677,6 +747,72 @@ export default function MainForm({ areas, initialLogs, initialLatest }: Props) {
       <footer className="text-center py-4 text-slate-400 text-xs border-t border-slate-200">
         Doctux SAS · Sistema de Consecutivos Contractuales · {new Date().getFullYear()}
       </footer>
+
+      {/* ── Modal de confirmación Excel ─────────────────────── */}
+      {showConfirmModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4"
+             style={{ backgroundColor: 'rgba(15,23,42,0.55)' }}>
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md border border-slate-200 overflow-hidden">
+
+            {/* Header */}
+            <div className="bg-amber-50 border-b border-amber-200 px-6 py-4 flex items-start gap-3">
+              <div className="mt-0.5 flex-shrink-0 bg-amber-100 rounded-full p-1.5">
+                <svg className="w-5 h-5 text-amber-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                    d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                </svg>
+              </div>
+              <div>
+                <h3 className="text-sm font-bold text-amber-800">Confirmar generación de consecutivo</h3>
+                <p className="text-xs text-amber-700 mt-0.5">Esta acción modificará el archivo Excel de SharePoint.</p>
+              </div>
+            </div>
+
+            {/* Cuerpo */}
+            <div className="px-6 py-5 space-y-3">
+              <p className="text-sm text-slate-700">
+                Al continuar, el nuevo consecutivo se <span className="font-semibold">registrará automáticamente</span> en
+                una nueva fila del siguiente archivo y la celda se pintará de azul:
+              </p>
+
+              {/* URL de solo lectura */}
+              <div className="flex items-center gap-2 rounded-lg bg-slate-50 border border-slate-200 px-3 py-2.5">
+                <svg className="w-4 h-4 text-slate-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                    d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                </svg>
+                <span className="text-xs font-mono text-slate-600 truncate select-all" title={excelUrl}>
+                  {excelUrl}
+                </span>
+              </div>
+
+              <p className="text-xs text-slate-500">
+                Una vez generado, <span className="font-medium">el archivo se abrirá en una nueva pestaña</span> para
+                que puedas verificar el registro.
+              </p>
+            </div>
+
+            {/* Acciones */}
+            <div className="px-6 pb-5 flex gap-3 justify-end">
+              <button
+                onClick={() => setShowConfirmModal(false)}
+                className="px-4 py-2 rounded-lg text-sm font-medium text-slate-600
+                           border border-slate-300 hover:bg-slate-50 transition-colors"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={executeGenerate}
+                className="px-5 py-2 rounded-lg text-sm font-semibold text-white
+                           bg-indigo-600 hover:bg-indigo-700 active:bg-indigo-800
+                           transition-colors focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2"
+              >
+                Confirmar y Generar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
