@@ -43,22 +43,19 @@ function encodeSharingUrl(url: string): string {
 // ── driveId / itemId cache ────────────────────────────────────
 let _cachedRef: { driveId: string; itemId: string } | null = null;
 
-// Extrae UPN y resid de URLs personales de OneDrive for Business:
-// https://{tenant}-my.sharepoint.com/:x:/g/personal/{userFolder}/{resid}
-function parsePersonalOneDriveUrl(url: string) {
-  const m = url.match(/https:\/\/[^/]+-my\.sharepoint\.com\/:x:\/g\/personal\/([^/]+)\/([^?/]+)/);
-  if (!m) return null;
-  const parts    = m[1].split('_');
-  const tld      = parts.pop()!;
-  const domain   = parts.pop()!;
-  const username = parts.join('_');
-  return { upn: `${username}@${domain}.${tld}`, resid: m[2] };
-}
-
 async function getDriveItem(token: string, shareUrl: string) {
   if (_cachedRef) return _cachedRef;
 
-  // Intento 1: endpoint /shares/ de Graph (funciona con sharing links ?e=... y URLs directas con permisos Sites.ReadWrite.All)
+  // Atajo: si el usuario configuró EXCEL_DRIVE_ID + EXCEL_ITEM_ID se salta
+  // toda la resolución de URL (más estable en producción).
+  const envDriveId = process.env.EXCEL_DRIVE_ID;
+  const envItemId  = process.env.EXCEL_ITEM_ID;
+  if (envDriveId && envItemId) {
+    _cachedRef = { driveId: envDriveId, itemId: envItemId };
+    return _cachedRef!;
+  }
+
+  // Intento 1: endpoint /shares/ de Graph
   const sharesRes = await fetch(
     `https://graph.microsoft.com/v1.0/shares/${encodeSharingUrl(shareUrl)}/driveItem?$select=id,parentReference`,
     { headers: { Authorization: `Bearer ${token}` }, cache: 'no-store' }
@@ -68,37 +65,68 @@ async function getDriveItem(token: string, shareUrl: string) {
     _cachedRef = { driveId: item.parentReference.driveId as string, itemId: item.id as string };
     return _cachedRef!;
   }
+  const errBody = await sharesRes.text().catch(() => '');
 
-  // Intento 2: para URLs personales de OneDrive for Business, resolver vía drive del usuario
-  const parsed = parsePersonalOneDriveUrl(shareUrl);
-  if (parsed) {
-    const driveRes = await fetch(
-      `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(parsed.upn)}/drive?$select=id`,
+  // Intento 2: URL personal de OneDrive for Business
+  // https://{tenant}-my.sharepoint.com/:x:/g/personal/{userFolder}/{resid}[?e=...]
+  const m = shareUrl.match(
+    /https:\/\/([^/]+-my\.sharepoint\.com)\/:x:\/g\/personal\/([^/]+)\/([^?/]+)/
+  );
+  if (m) {
+    const [, hostname, userFolder, resid] = m;
+
+    // 2a: vía /sites/{hostname}:/personal/{userFolder} (requiere Sites.ReadWrite.All)
+    const siteRes = await fetch(
+      `https://graph.microsoft.com/v1.0/sites/${hostname}:/personal/${userFolder}?$select=id`,
       { headers: { Authorization: `Bearer ${token}` }, cache: 'no-store' }
     );
-    if (driveRes.ok) {
-      const drive   = await driveRes.json();
-      const driveId = drive.id as string;
+    if (siteRes.ok) {
+      const siteId = (await siteRes.json()).id as string;
+      const driveRes = await fetch(
+        `https://graph.microsoft.com/v1.0/sites/${siteId}/drive?$select=id`,
+        { headers: { Authorization: `Bearer ${token}` }, cache: 'no-store' }
+      );
+      if (driveRes.ok) {
+        const driveId = (await driveRes.json()).id as string;
+        const itemRes = await fetch(
+          `https://graph.microsoft.com/v1.0/drives/${driveId}/items/${resid}?$select=id`,
+          { headers: { Authorization: `Bearer ${token}` }, cache: 'no-store' }
+        );
+        if (itemRes.ok) {
+          _cachedRef = { driveId, itemId: (await itemRes.json()).id as string };
+          return _cachedRef!;
+        }
+      }
+    }
 
-      // Intentar usar el resid de la URL como item ID (funciona en algunos tenants)
+    // 2b: vía /users/{upn}/drive (requiere Files.ReadWrite.All + admin consent)
+    const parts  = userFolder.split('_');
+    const tld    = parts.pop()!;
+    const domain = parts.pop()!;
+    const upn    = `${parts.join('_')}@${domain}.${tld}`;
+    const userDriveRes = await fetch(
+      `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(upn)}/drive?$select=id`,
+      { headers: { Authorization: `Bearer ${token}` }, cache: 'no-store' }
+    );
+    if (userDriveRes.ok) {
+      const driveId = (await userDriveRes.json()).id as string;
       const itemRes = await fetch(
-        `https://graph.microsoft.com/v1.0/drives/${driveId}/items/${parsed.resid}?$select=id,parentReference`,
+        `https://graph.microsoft.com/v1.0/drives/${driveId}/items/${resid}?$select=id`,
         { headers: { Authorization: `Bearer ${token}` }, cache: 'no-store' }
       );
       if (itemRes.ok) {
-        const item = await itemRes.json();
-        _cachedRef = { driveId, itemId: item.id as string };
+        _cachedRef = { driveId, itemId: (await itemRes.json()).id as string };
         return _cachedRef!;
       }
     }
   }
 
-  const errBody = await sharesRes.text().catch(() => '(sin detalle)');
   throw new Error(
-    `No se pudo resolver el archivo de SharePoint. ` +
-    `Usa el enlace de compartir generado desde OneDrive (botón "Compartir" → "Copiar vínculo", ` +
-    `la URL debe terminar en "?e=…"), o agrega el permiso "Sites.ReadWrite.All" en Azure AD. ` +
-    `Detalle API: ${errBody}`
+    `Sin acceso al archivo Excel. Revisa: ` +
+    `(1) permiso "Files.ReadWrite.All" (Application) con consentimiento de administrador concedido en Azure AD, ` +
+    `(2) permiso "Sites.ReadWrite.All" (Application) también con consent, ` +
+    `o (3) configura EXCEL_DRIVE_ID + EXCEL_ITEM_ID directamente (ver .env.example). ` +
+    `API: ${errBody}`
   );
 }
 
