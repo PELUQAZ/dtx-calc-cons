@@ -55,13 +55,6 @@ function IconSpinner() {
 
 // ── Helpers extra ─────────────────────────────────────────
 
-const TIPO_SHORT: Record<string, string> = {
-  CONFIDENCIALIDAD: 'Confidencialidad',
-  CLIENTES:         'Clientes',
-  ALIANZAS:         'Alianzas',
-  PROVEEDORES:      'Proveedores',
-};
-
 function timeAgo(iso: string): string {
   const diff = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
   if (diff < 60)   return 'hace ' + diff + 's';
@@ -86,9 +79,10 @@ export default function MainForm({ areas, initialLogs, initialLatest }: Props) {
   const [tipoContrato, setTipoContrato]   = useState('');
   const [areaId, setAreaId]               = useState('');
   const [nombreUsuario, setNombreUsuario] = useState('');
-  const [generatedCode, setGeneratedCode] = useState<string | null>(null);
-  const [copied, setCopied]               = useState(false);
-  const [errorMsg, setErrorMsg]           = useState<string | null>(null);
+  const [generatedCode, setGeneratedCode]         = useState<string | null>(null);
+  const [lastGeneratedAreaId, setLastGeneratedAreaId] = useState<string | null>(null);
+  const [copiedAreaId, setCopiedAreaId]           = useState<string | null>(null);
+  const [errorMsg, setErrorMsg]                   = useState<string | null>(null);
   const [isPending, startTransition]      = useTransition();
 
   // --- Grid ---
@@ -169,6 +163,16 @@ export default function MainForm({ areas, initialLogs, initialLatest }: Props) {
       : null;
   const canGenerate = tipoContrato !== '' && (tipoContrato !== 'PROVEEDORES' || areaId !== '');
 
+  // ── Resumen: ordenado por más reciente primero ───────────
+  const sortedLatest = useMemo(() => {
+    return [...latestPerArea].sort((a, b) => {
+      if (!a.fecha_hora_creacion && !b.fecha_hora_creacion) return 0;
+      if (!a.fecha_hora_creacion) return 1;
+      if (!b.fecha_hora_creacion) return -1;
+      return b.fecha_hora_creacion.localeCompare(a.fecha_hora_creacion);
+    });
+  }, [latestPerArea]);
+
   // ── Grid: filtrado y ordenación ──────────────────────────
   const displayedLogs = useMemo(() => {
     let result = [...logs];
@@ -231,10 +235,10 @@ export default function MainForm({ areas, initialLogs, initialLatest }: Props) {
       const result = await generateConsecutive(areaId, nombreUsuario);
       if (result.success && result.codigo && result.logEntry) {
         setGeneratedCode(result.codigo);
+        setLastGeneratedAreaId(areaId);
         setLogs(prev =>
           prev.some(l => l.id === result.logEntry!.id) ? prev : [result.logEntry!, ...prev]
         );
-        // Refrescar el panel resumen
         getLatestPerArea().then(setLatestPerArea);
         setRecentlyUpdated(s => new Set(s).add(areaId));
         setTimeout(() => {
@@ -246,21 +250,27 @@ export default function MainForm({ areas, initialLogs, initialLatest }: Props) {
     });
   }
 
-  async function handleCopy() {
-    if (!generatedCode) return;
+  async function handleCopyArea(areaId: string, code: string) {
     try {
-      await navigator.clipboard.writeText(generatedCode);
+      await navigator.clipboard.writeText(code);
     } catch {
       const ta = document.createElement('textarea');
-      ta.value = generatedCode;
+      ta.value = code;
       ta.style.cssText = 'position:fixed;opacity:0';
       document.body.appendChild(ta);
       ta.select();
       document.execCommand('copy');
       document.body.removeChild(ta);
     }
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2500);
+    setCopiedAreaId(areaId);
+    setTimeout(() => setCopiedAreaId(id => id === areaId ? null : id), 2500);
+  }
+
+  function formatNombreResumen(tipo: string, areaNombre: string): string {
+    const tipoLabel = TIPO_LABELS[tipo] ?? tipo;
+    if (tipo !== 'PROVEEDORES') return tipoLabel;
+    const areaCorta = areaNombre.replace(/^Área\s+/i, '');
+    return `${tipoLabel} / A. ${areaCorta}`;
   }
 
   async function handleDelete(log: LogEntry) {
@@ -304,10 +314,10 @@ export default function MainForm({ areas, initialLogs, initialLatest }: Props) {
 
       {/* Body — dos columnas */}
       <div className="flex-1 max-w-screen-xl mx-auto w-full px-6 py-6
-                      grid grid-cols-1 lg:grid-cols-5 gap-6 items-start">
+                      grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
 
-        {/* ══ COLUMNA IZQUIERDA (2/5) ══════════════════════════ */}
-        <div className="lg:col-span-2 space-y-4">
+        {/* ══ COLUMNA IZQUIERDA (4/12 ≈ 33%) ══════════════════ */}
+        <div className="lg:col-span-4 space-y-4">
 
           {/* Tarjeta: Formulario */}
           <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-5">
@@ -425,7 +435,7 @@ export default function MainForm({ areas, initialLogs, initialLatest }: Props) {
 
           {/* ── Panel: Últimos por área ── */}
           <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
-            <div className="px-5 py-3 border-b border-slate-100 flex items-center justify-between">
+            <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
               <h3 className="text-xs font-semibold text-slate-600 uppercase tracking-wide">
                 Últimos Consecutivos
               </h3>
@@ -436,42 +446,62 @@ export default function MainForm({ areas, initialLogs, initialLatest }: Props) {
             </div>
 
             <ul className="divide-y divide-slate-100">
-              {latestPerArea.length === 0 ? (
-                <li className="px-5 py-4 text-xs text-slate-400 text-center">Sin registros aún.</li>
+              {sortedLatest.length === 0 ? (
+                <li className="px-4 py-4 text-xs text-slate-400 text-center">Sin registros aún.</li>
               ) : (
-                latestPerArea.map((item) => {
-                  const isNew = recentlyUpdated.has(item.area_id);
-                  const esProveedor = item.tipo_contrato === 'PROVEEDORES';
+                sortedLatest.map((item) => {
+                  const isLast   = item.area_id === lastGeneratedAreaId;
+                  const isNew    = recentlyUpdated.has(item.area_id);
+                  const isCopied = copiedAreaId === item.area_id;
+
                   return (
                     <li
                       key={item.area_id}
-                      className={`px-5 py-2.5 flex items-center gap-3 transition-colors duration-500
-                                  ${isNew ? 'bg-indigo-50' : 'hover:bg-slate-50'}`}
+                      className={`px-4 py-2.5 flex items-center gap-2 transition-colors duration-500
+                                  ${isNew ? 'bg-indigo-50' : isLast ? 'bg-indigo-50/40' : 'hover:bg-slate-50'}`}
                     >
-                      {/* Indicador de tipo */}
-                      <span className="w-1.5 h-1.5 rounded-full flex-shrink-0 bg-indigo-300" />
-
-                      {/* Tipo + área */}
+                      {/* Nombre completo */}
                       <div className="flex-1 min-w-0">
-                        <p className="text-xs font-medium text-slate-700 truncate">
-                          {TIPO_SHORT[item.tipo_contrato] ?? item.tipo_contrato}
+                        <p className={`text-xs leading-snug truncate
+                                       ${isLast ? 'font-semibold text-slate-800' : 'font-medium text-slate-600'}`}>
+                          {formatNombreResumen(item.tipo_contrato, item.area_nombre)}
                         </p>
-                        {esProveedor && (
-                          <p className="text-xs text-slate-400 truncate">{item.area_nombre}</p>
+                        {item.fecha_hora_creacion && (
+                          <p className="text-xs text-slate-400 mt-0.5">
+                            {timeAgo(item.fecha_hora_creacion)}
+                          </p>
                         )}
                       </div>
 
-                      {/* Código + tiempo */}
-                      <div className="text-right flex-shrink-0">
+                      {/* Código + botón copiar */}
+                      <div className="flex items-center gap-1.5 flex-shrink-0">
                         {item.codigo_generado ? (
                           <>
-                            <p className={`font-mono text-xs font-bold transition-colors
-                                          ${isNew ? 'text-indigo-600' : 'text-slate-700'}`}>
+                            <span className={`font-mono font-bold transition-colors
+                                             ${isLast ? 'text-base text-indigo-700' : 'text-xs text-slate-700'}`}>
                               {item.codigo_generado}
-                            </p>
-                            <p className="text-xs text-slate-400">
-                              {timeAgo(item.fecha_hora_creacion!)}
-                            </p>
+                            </span>
+                            <button
+                              onClick={() => handleCopyArea(item.area_id, item.codigo_generado!)}
+                              title="Copiar"
+                              className={`inline-flex items-center justify-center w-6 h-6 rounded
+                                          transition-colors focus:outline-none
+                                          ${isCopied
+                                            ? 'text-emerald-600 bg-emerald-50'
+                                            : 'text-slate-400 hover:text-indigo-600 hover:bg-indigo-50'
+                                          }`}
+                            >
+                              {isCopied ? (
+                                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" />
+                                </svg>
+                              ) : (
+                                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                                    d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                                </svg>
+                              )}
+                            </button>
                           </>
                         ) : (
                           <span className="text-xs italic text-slate-300">Sin generar</span>
@@ -483,56 +513,10 @@ export default function MainForm({ areas, initialLogs, initialLatest }: Props) {
               )}
             </ul>
           </div>
-
-          {/* ── Tarjeta: Resultado ── */}
-          {generatedCode && (
-            <div className="bg-white rounded-2xl shadow-sm border-2 border-indigo-200 p-5">
-              <p className="text-xs font-semibold uppercase tracking-widest text-slate-400 mb-1">
-                Consecutivo Generado
-              </p>
-              <p className="text-xs text-slate-500 mb-3">
-                {TIPO_LABELS[tipoContrato] ?? tipoContrato}
-                {areaActiva && tipoContrato === 'PROVEEDORES' && ` · ${areaActiva.nombre}`}
-              </p>
-
-              <div className="flex flex-wrap items-center gap-3">
-                <span className="text-3xl font-mono font-extrabold text-indigo-700 tracking-widest select-all">
-                  {generatedCode}
-                </span>
-
-                <button
-                  onClick={handleCopy}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium
-                              transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-indigo-400
-                              ${copied
-                                ? 'bg-emerald-50 text-emerald-700 border border-emerald-300'
-                                : 'bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200'
-                              }`}
-                >
-                  {copied ? (
-                    <>
-                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                      </svg>
-                      ¡Copiado!
-                    </>
-                  ) : (
-                    <>
-                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                          d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                      </svg>
-                      Copiar
-                    </>
-                  )}
-                </button>
-              </div>
-            </div>
-          )}
         </div>
 
-        {/* ══ COLUMNA DERECHA (3/5) ════════════════════════════ */}
-        <div className="lg:col-span-3 bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden flex flex-col">
+        {/* ══ COLUMNA DERECHA (8/12 ≈ 67%) ════════════════════ */}
+        <div className="lg:col-span-8 min-w-0 bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden flex flex-col">
 
           {/* Header del grid */}
           <div className="px-5 py-4 border-b border-slate-100">
@@ -575,7 +559,7 @@ export default function MainForm({ areas, initialLogs, initialLatest }: Props) {
           </div>
 
           {/* Tabla */}
-          <div className="overflow-auto flex-1">
+          <div className="overflow-y-auto overflow-x-hidden flex-1">
             {displayedLogs.length === 0 ? (
               <div className="px-5 py-12 text-center text-slate-400 text-sm">
                 {search ? (
@@ -585,24 +569,23 @@ export default function MainForm({ areas, initialLogs, initialLatest }: Props) {
                 )}
               </div>
             ) : (
-              <table className="w-full text-sm">
+              <table className="w-full text-sm table-fixed">
                 <thead className="sticky top-0 z-10 bg-slate-50 border-b border-slate-200">
                   <tr>
                     {(
                       [
-                        { col: 'codigo_generado',    label: 'Código' },
-                        { col: 'tipo_contrato',      label: 'Tipo de Contrato' },
-                        { col: 'area_nombre',         label: 'Área' },
-                        { col: 'nombre_usuario',      label: 'Usuario' },
-                        { col: 'fecha_hora_creacion', label: 'Fecha y Hora' },
-                      ] as { col: SortCol; label: string }[]
-                    ).map(({ col, label }) => (
+                        { col: 'codigo_generado',    label: 'Código',          w: 'w-[10%]' },
+                        { col: 'tipo_contrato',      label: 'Tipo',            w: 'w-[28%]' },
+                        { col: 'area_nombre',         label: 'Área',           w: 'w-[16%]' },
+                        { col: 'nombre_usuario',      label: 'Usuario',        w: 'w-[16%]' },
+                        { col: 'fecha_hora_creacion', label: 'Fecha y Hora',   w: 'w-[22%]' },
+                      ] as { col: SortCol; label: string; w: string }[]
+                    ).map(({ col, label, w }) => (
                       <th
                         key={col + label}
                         onClick={() => handleSort(col)}
-                        className="px-4 py-2.5 text-left text-xs font-semibold text-slate-500
-                                   uppercase tracking-wide whitespace-nowrap
-                                   cursor-pointer hover:text-indigo-600 select-none"
+                        className={`${w} px-3 py-2.5 text-left text-xs font-semibold text-slate-500
+                                   uppercase tracking-wide cursor-pointer hover:text-indigo-600 select-none`}
                       >
                         {label}
                         <IconSort col={col} active={sortCol === col} dir={sortDir} />
@@ -629,17 +612,18 @@ export default function MainForm({ areas, initialLogs, initialLatest }: Props) {
                         } ${isDeleting ? 'opacity-40' : ''}`}
                       >
                         {/* Código */}
-                        <td className="px-4 py-2.5 font-mono font-bold text-indigo-700 whitespace-nowrap">
+                        <td className="px-3 py-2.5 font-mono font-bold text-indigo-700 truncate">
                           {log.codigo_generado}
                         </td>
 
                         {/* Tipo de Contrato */}
-                        <td className="px-4 py-2.5 text-slate-700 whitespace-nowrap text-xs">
+                        <td className="px-3 py-2.5 text-slate-700 text-xs truncate"
+                            title={TIPO_LABELS[log.tipo_contrato] ?? log.tipo_contrato}>
                           {TIPO_LABELS[log.tipo_contrato] ?? log.tipo_contrato}
                         </td>
 
                         {/* Área (N/A si no es Proveedores) */}
-                        <td className="px-4 py-2.5 whitespace-nowrap text-xs">
+                        <td className="px-3 py-2.5 text-xs truncate">
                           {esProveedor ? (
                             <span className="text-slate-700">{log.area_nombre}</span>
                           ) : (
@@ -648,20 +632,20 @@ export default function MainForm({ areas, initialLogs, initialLatest }: Props) {
                         </td>
 
                         {/* Usuario */}
-                        <td className="px-4 py-2.5 text-slate-500 whitespace-nowrap text-xs">
+                        <td className="px-3 py-2.5 text-slate-500 text-xs truncate">
                           {log.nombre_usuario ?? (
                             <span className="italic text-slate-300">Anónimo</span>
                           )}
                         </td>
 
-                        {/* Fecha y Hora (unidas) */}
-                        <td className="px-4 py-2.5 whitespace-nowrap text-xs">
+                        {/* Fecha y Hora */}
+                        <td className="px-3 py-2.5 text-xs">
                           <span className="text-slate-600">{fecha}</span>
-                          <span className="text-slate-400 ml-1.5">{hora}</span>
+                          <span className="text-slate-400 ml-1">{hora}</span>
                         </td>
 
                         {/* Acción eliminar */}
-                        <td className="px-4 py-2.5 text-center">
+                        <td className="px-3 py-2.5 text-center w-[8%]">
                           <button
                             onClick={() => handleDelete(log)}
                             disabled={isDeleting}
