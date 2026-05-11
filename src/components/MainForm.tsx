@@ -710,8 +710,8 @@ export default function MainForm({ areas, initialLogs, initialLatest, excelUrl, 
                   <tr>
                     {(
                       [
-                        { col: 'codigo_generado',    label: 'Código',          w: 'w-[10%]' },
-                        { col: 'tipo_contrato',      label: 'Tipo',            w: 'w-[28%]' },
+                        { col: 'codigo_generado',    label: 'Código',          w: 'w-[14%]' },
+                        { col: 'tipo_contrato',      label: 'Tipo',            w: 'w-[24%]' },
                         { col: 'area_nombre',         label: 'Área',           w: 'w-[16%]' },
                         { col: 'nombre_usuario',      label: 'Usuario',        w: 'w-[16%]' },
                         { col: 'fecha_hora_creacion', label: 'Fecha y Hora',   w: 'w-[22%]' },
