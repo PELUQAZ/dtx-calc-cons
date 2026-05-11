@@ -1,8 +1,9 @@
 'use client';
 
-import { useMemo, useState, useTransition } from 'react';
-import { generateConsecutive, deleteConsecutive } from '@/actions/consecutives';
-import type { Area, LogEntry } from '@/types';
+import { useEffect, useMemo, useRef, useState, useTransition } from 'react';
+import { generateConsecutive, deleteConsecutive, getLatestPerArea } from '@/actions/consecutives';
+import { getBrowserClient } from '@/lib/supabase';
+import type { Area, LatestByArea, LogEntry } from '@/types';
 
 // ── Tipos de contrato ─────────────────────────────────────
 
@@ -52,29 +53,110 @@ function IconSpinner() {
   );
 }
 
+// ── Helpers extra ─────────────────────────────────────────
+
+const TIPO_SHORT: Record<string, string> = {
+  CONFIDENCIALIDAD: 'Confidencialidad',
+  CLIENTES:         'Clientes',
+  ALIANZAS:         'Alianzas',
+  PROVEEDORES:      'Proveedores',
+};
+
+function timeAgo(iso: string): string {
+  const diff = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
+  if (diff < 60)   return 'hace ' + diff + 's';
+  if (diff < 3600) return 'hace ' + Math.floor(diff / 60) + 'min';
+  if (diff < 86400) return 'hace ' + Math.floor(diff / 3600) + 'h';
+  return new Date(iso).toLocaleDateString('es-CO', { day: '2-digit', month: '2-digit' });
+}
+
 // ── Props ─────────────────────────────────────────────────
 
-interface Props { areas: Area[]; initialLogs: LogEntry[] }
+interface Props {
+  areas: Area[];
+  initialLogs: LogEntry[];
+  initialLatest: LatestByArea[];
+}
 
 // ── Componente ────────────────────────────────────────────
 
-export default function MainForm({ areas, initialLogs }: Props) {
+export default function MainForm({ areas, initialLogs, initialLatest }: Props) {
 
   // --- Formulario ---
-  const [tipoContrato, setTipoContrato]     = useState('');
-  const [areaId, setAreaId]                 = useState('');
-  const [nombreUsuario, setNombreUsuario]   = useState('');
-  const [generatedCode, setGeneratedCode]   = useState<string | null>(null);
-  const [copied, setCopied]                 = useState(false);
-  const [errorMsg, setErrorMsg]             = useState<string | null>(null);
-  const [isPending, startTransition]        = useTransition();
+  const [tipoContrato, setTipoContrato]   = useState('');
+  const [areaId, setAreaId]               = useState('');
+  const [nombreUsuario, setNombreUsuario] = useState('');
+  const [generatedCode, setGeneratedCode] = useState<string | null>(null);
+  const [copied, setCopied]               = useState(false);
+  const [errorMsg, setErrorMsg]           = useState<string | null>(null);
+  const [isPending, startTransition]      = useTransition();
 
   // --- Grid ---
-  const [logs, setLogs]           = useState<LogEntry[]>(initialLogs);
-  const [search, setSearch]       = useState('');
-  const [sortCol, setSortCol]     = useState<SortCol>('fecha_hora_creacion');
-  const [sortDir, setSortDir]     = useState<'asc' | 'desc'>('desc');
+  const [logs, setLogs]             = useState<LogEntry[]>(initialLogs);
+  const [search, setSearch]         = useState('');
+  const [sortCol, setSortCol]       = useState<SortCol>('fecha_hora_creacion');
+  const [sortDir, setSortDir]       = useState<'asc' | 'desc'>('desc');
   const [deletingId, setDeletingId] = useState<string | null>(null);
+
+  // --- Resumen últimos por área ---
+  const [latestPerArea, setLatestPerArea]   = useState<LatestByArea[]>(initialLatest);
+  const [recentlyUpdated, setRecentlyUpdated] = useState<Set<string>>(new Set());
+  const fetchingRef = useRef(false);
+
+  // ── Suscripción Realtime ─────────────────────────────────
+  useEffect(() => {
+    const supabase = getBrowserClient();
+
+    const channel = supabase
+      .channel('consecutivos-rt')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'consecutives_log' },
+        async (payload) => {
+          // Actualizar resumen por área
+          if (!fetchingRef.current) {
+            fetchingRef.current = true;
+            const latest = await getLatestPerArea();
+            setLatestPerArea(latest);
+            fetchingRef.current = false;
+          }
+
+          // Actualizar log principal
+          if (payload.eventType === 'INSERT') {
+            const rec = payload.new as {
+              id: string; area_id: string; codigo_generado: string;
+              nombre_usuario: string | null; fecha_hora_creacion: string;
+            };
+            const area = areas.find(a => a.id === rec.area_id);
+            if (area) {
+              const entry: LogEntry = {
+                id: rec.id,
+                codigo_generado: rec.codigo_generado,
+                tipo_contrato: area.tipo_contrato,
+                area_nombre: area.nombre,
+                nombre_usuario: rec.nombre_usuario,
+                fecha_hora_creacion: rec.fecha_hora_creacion,
+              };
+              setLogs(prev => prev.some(l => l.id === rec.id) ? prev : [entry, ...prev]);
+              // Marcar área como "recién actualizada" por 3s
+              setRecentlyUpdated(s => new Set(s).add(rec.area_id));
+              setTimeout(() => {
+                setRecentlyUpdated(s => { const n = new Set(s); n.delete(rec.area_id); return n; });
+              }, 3000);
+            }
+          }
+
+          if (payload.eventType === 'DELETE') {
+            const oldId = (payload.old as { id: string }).id;
+            setLogs(prev => prev.filter(l => l.id !== oldId));
+          }
+        }
+      )
+      .subscribe();
+
+    return () => { supabase.removeChannel(channel); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // ── Derivados ────────────────────────────────────────────
   const tiposDisponibles   = TIPO_ORDER.filter(t => areas.some(a => a.tipo_contrato === t));
@@ -149,7 +231,15 @@ export default function MainForm({ areas, initialLogs }: Props) {
       const result = await generateConsecutive(areaId, nombreUsuario);
       if (result.success && result.codigo && result.logEntry) {
         setGeneratedCode(result.codigo);
-        setLogs(prev => [result.logEntry!, ...prev]);
+        setLogs(prev =>
+          prev.some(l => l.id === result.logEntry!.id) ? prev : [result.logEntry!, ...prev]
+        );
+        // Refrescar el panel resumen
+        getLatestPerArea().then(setLatestPerArea);
+        setRecentlyUpdated(s => new Set(s).add(areaId));
+        setTimeout(() => {
+          setRecentlyUpdated(s => { const n = new Set(s); n.delete(areaId); return n; });
+        }, 3000);
       } else {
         setErrorMsg(result.error ?? 'Error al generar el consecutivo.');
       }
@@ -333,7 +423,68 @@ export default function MainForm({ areas, initialLogs }: Props) {
             </button>
           </div>
 
-          {/* Tarjeta: Resultado */}
+          {/* ── Panel: Últimos por área ── */}
+          <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+            <div className="px-5 py-3 border-b border-slate-100 flex items-center justify-between">
+              <h3 className="text-xs font-semibold text-slate-600 uppercase tracking-wide">
+                Últimos Consecutivos
+              </h3>
+              <span className="flex items-center gap-1.5 text-xs text-emerald-600">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                En vivo
+              </span>
+            </div>
+
+            <ul className="divide-y divide-slate-100">
+              {latestPerArea.length === 0 ? (
+                <li className="px-5 py-4 text-xs text-slate-400 text-center">Sin registros aún.</li>
+              ) : (
+                latestPerArea.map((item) => {
+                  const isNew = recentlyUpdated.has(item.area_id);
+                  const esProveedor = item.tipo_contrato === 'PROVEEDORES';
+                  return (
+                    <li
+                      key={item.area_id}
+                      className={`px-5 py-2.5 flex items-center gap-3 transition-colors duration-500
+                                  ${isNew ? 'bg-indigo-50' : 'hover:bg-slate-50'}`}
+                    >
+                      {/* Indicador de tipo */}
+                      <span className="w-1.5 h-1.5 rounded-full flex-shrink-0 bg-indigo-300" />
+
+                      {/* Tipo + área */}
+                      <div className="flex-1 min-w-0">
+                        <p className="text-xs font-medium text-slate-700 truncate">
+                          {TIPO_SHORT[item.tipo_contrato] ?? item.tipo_contrato}
+                        </p>
+                        {esProveedor && (
+                          <p className="text-xs text-slate-400 truncate">{item.area_nombre}</p>
+                        )}
+                      </div>
+
+                      {/* Código + tiempo */}
+                      <div className="text-right flex-shrink-0">
+                        {item.codigo_generado ? (
+                          <>
+                            <p className={`font-mono text-xs font-bold transition-colors
+                                          ${isNew ? 'text-indigo-600' : 'text-slate-700'}`}>
+                              {item.codigo_generado}
+                            </p>
+                            <p className="text-xs text-slate-400">
+                              {timeAgo(item.fecha_hora_creacion!)}
+                            </p>
+                          </>
+                        ) : (
+                          <span className="text-xs italic text-slate-300">Sin generar</span>
+                        )}
+                      </div>
+                    </li>
+                  );
+                })
+              )}
+            </ul>
+          </div>
+
+          {/* ── Tarjeta: Resultado ── */}
           {generatedCode && (
             <div className="bg-white rounded-2xl shadow-sm border-2 border-indigo-200 p-5">
               <p className="text-xs font-semibold uppercase tracking-widest text-slate-400 mb-1">

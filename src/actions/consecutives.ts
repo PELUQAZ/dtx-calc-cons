@@ -2,7 +2,7 @@
 
 import { revalidatePath } from 'next/cache';
 import { createServerClient } from '@/lib/supabase';
-import type { GenerateResult, LogEntry } from '@/types';
+import type { GenerateResult, LatestByArea, LogEntry } from '@/types';
 
 type AreaRow = { nombre: string; tipo_contrato: string } | null;
 
@@ -77,6 +77,20 @@ export async function deleteConsecutive(id: string): Promise<{ success: boolean;
 
   revalidatePath('/');
   return { success: true };
+}
+
+/** Último consecutivo generado por cada área activa del cliente. */
+export async function getLatestPerArea(): Promise<LatestByArea[]> {
+  const supabase = createServerClient();
+  const clientId = getClientId();
+
+  const { data, error } = await supabase.rpc('get_latest_per_area', {
+    p_client_id: clientId,
+  });
+
+  if (error || !data) return [];
+
+  return (data as LatestByArea[]);
 }
 
 /** Devuelve los últimos N registros de la bitácora para el cliente actual. */

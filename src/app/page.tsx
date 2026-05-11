@@ -1,13 +1,13 @@
 import { createServerClient } from '@/lib/supabase';
+import { getLatestPerArea } from '@/actions/consecutives';
 import MainForm from '@/components/MainForm';
-import type { Area, LogEntry } from '@/types';
+import type { Area, LatestByArea, LogEntry } from '@/types';
 
-/** Recarga la página fresca en cada visita (sin cache estático). */
 export const dynamic = 'force-dynamic';
 
 export default async function Home() {
-  const supabase  = createServerClient();
-  const clientId  = process.env.CLIENT_ID;
+  const supabase = createServerClient();
+  const clientId = process.env.CLIENT_ID;
 
   if (!clientId) {
     return (
@@ -15,16 +15,17 @@ export default async function Home() {
         <div className="bg-red-50 border border-red-200 text-red-700 rounded-xl px-8 py-6 max-w-md text-center">
           <p className="font-semibold mb-1">Configuración incompleta</p>
           <p className="text-sm">
-            La variable de entorno <code className="font-mono bg-red-100 px-1 rounded">CLIENT_ID</code> no está definida.
-            Crea el archivo <code className="font-mono bg-red-100 px-1 rounded">.env.local</code> a partir de{' '}
-            <code className="font-mono bg-red-100 px-1 rounded">.env.example</code>.
+            La variable de entorno{' '}
+            <code className="font-mono bg-red-100 px-1 rounded">CLIENT_ID</code> no está definida.
           </p>
         </div>
       </div>
     );
   }
 
-  const [{ data: areasRaw }, { data: logsRaw }] = await Promise.all([
+  type AreaJoin = { nombre: string; tipo_contrato: string } | null;
+
+  const [{ data: areasRaw }, { data: logsRaw }, initialLatest] = await Promise.all([
     supabase
       .from('areas')
       .select('id, client_id, nombre, prefijo, tipo_contrato, activo, created_at')
@@ -38,11 +39,11 @@ export default async function Home() {
       .eq('client_id', clientId)
       .order('fecha_hora_creacion', { ascending: false })
       .limit(50),
+
+    getLatestPerArea(),
   ]);
 
   const areas: Area[] = (areasRaw ?? []) as Area[];
-
-  type AreaJoin = { nombre: string; tipo_contrato: string } | null;
 
   const initialLogs: LogEntry[] = (logsRaw ?? []).map((row) => {
     const area = row.areas as unknown as AreaJoin;
@@ -56,5 +57,11 @@ export default async function Home() {
     };
   });
 
-  return <MainForm areas={areas} initialLogs={initialLogs} />;
+  return (
+    <MainForm
+      areas={areas}
+      initialLogs={initialLogs}
+      initialLatest={initialLatest as LatestByArea[]}
+    />
+  );
 }

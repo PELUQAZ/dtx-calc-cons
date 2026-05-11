@@ -18,6 +18,15 @@ export interface LogEntry {
   fecha_hora_creacion: string;
 }
 
+/** Último consecutivo generado por área (para el panel resumen) */
+export interface LatestByArea {
+  area_id: string;
+  tipo_contrato: string;
+  area_nombre: string;
+  codigo_generado: string | null;
+  fecha_hora_creacion: string | null;
+}
+
 export interface GenerateResult {
   success: boolean;
   codigo?: string;
