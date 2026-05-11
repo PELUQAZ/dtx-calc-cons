@@ -43,18 +43,63 @@ function encodeSharingUrl(url: string): string {
 // ── driveId / itemId cache ────────────────────────────────────
 let _cachedRef: { driveId: string; itemId: string } | null = null;
 
+// Extrae UPN y resid de URLs personales de OneDrive for Business:
+// https://{tenant}-my.sharepoint.com/:x:/g/personal/{userFolder}/{resid}
+function parsePersonalOneDriveUrl(url: string) {
+  const m = url.match(/https:\/\/[^/]+-my\.sharepoint\.com\/:x:\/g\/personal\/([^/]+)\/([^?/]+)/);
+  if (!m) return null;
+  const parts    = m[1].split('_');
+  const tld      = parts.pop()!;
+  const domain   = parts.pop()!;
+  const username = parts.join('_');
+  return { upn: `${username}@${domain}.${tld}`, resid: m[2] };
+}
+
 async function getDriveItem(token: string, shareUrl: string) {
   if (_cachedRef) return _cachedRef;
 
-  const res = await fetch(
+  // Intento 1: endpoint /shares/ de Graph (funciona con sharing links ?e=... y URLs directas con permisos Sites.ReadWrite.All)
+  const sharesRes = await fetch(
     `https://graph.microsoft.com/v1.0/shares/${encodeSharingUrl(shareUrl)}/driveItem?$select=id,parentReference`,
     { headers: { Authorization: `Bearer ${token}` }, cache: 'no-store' }
   );
-  if (!res.ok) throw new Error(`No se pudo resolver la URL de SharePoint: ${await res.text()}`);
+  if (sharesRes.ok) {
+    const item = await sharesRes.json();
+    _cachedRef = { driveId: item.parentReference.driveId as string, itemId: item.id as string };
+    return _cachedRef!;
+  }
 
-  const item = await res.json();
-  _cachedRef = { driveId: item.parentReference.driveId as string, itemId: item.id as string };
-  return _cachedRef!;
+  // Intento 2: para URLs personales de OneDrive for Business, resolver vía drive del usuario
+  const parsed = parsePersonalOneDriveUrl(shareUrl);
+  if (parsed) {
+    const driveRes = await fetch(
+      `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(parsed.upn)}/drive?$select=id`,
+      { headers: { Authorization: `Bearer ${token}` }, cache: 'no-store' }
+    );
+    if (driveRes.ok) {
+      const drive   = await driveRes.json();
+      const driveId = drive.id as string;
+
+      // Intentar usar el resid de la URL como item ID (funciona en algunos tenants)
+      const itemRes = await fetch(
+        `https://graph.microsoft.com/v1.0/drives/${driveId}/items/${parsed.resid}?$select=id,parentReference`,
+        { headers: { Authorization: `Bearer ${token}` }, cache: 'no-store' }
+      );
+      if (itemRes.ok) {
+        const item = await itemRes.json();
+        _cachedRef = { driveId, itemId: item.id as string };
+        return _cachedRef!;
+      }
+    }
+  }
+
+  const errBody = await sharesRes.text().catch(() => '(sin detalle)');
+  throw new Error(
+    `No se pudo resolver el archivo de SharePoint. ` +
+    `Usa el enlace de compartir generado desde OneDrive (botón "Compartir" → "Copiar vínculo", ` +
+    `la URL debe terminar en "?e=…"), o agrega el permiso "Sites.ReadWrite.All" en Azure AD. ` +
+    `Detalle API: ${errBody}`
+  );
 }
 
 // ── Helper fetch con cabeceras de Graph + sesión ──────────────
