@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState, useTransition } from 'react';
 import { generateConsecutive, deleteConsecutive, getLatestPerArea } from '@/actions/consecutives';
-import { appendConsecutiveToExcel } from '@/actions/excel';
+import { appendConsecutiveToExcel, syncFromExcel } from '@/actions/excel';
 import { getBrowserClient } from '@/lib/supabase';
 import type { Area, LatestByArea, LogEntry } from '@/types';
 
@@ -71,11 +71,12 @@ interface Props {
   initialLogs: LogEntry[];
   initialLatest: LatestByArea[];
   excelUrl?: string;
+  excelConfigured?: boolean;
 }
 
 // ── Componente ────────────────────────────────────────────
 
-export default function MainForm({ areas, initialLogs, initialLatest, excelUrl }: Props) {
+export default function MainForm({ areas, initialLogs, initialLatest, excelUrl, excelConfigured }: Props) {
 
   // --- Formulario ---
   const [tipoContrato, setTipoContrato]   = useState('');
@@ -87,10 +88,15 @@ export default function MainForm({ areas, initialLogs, initialLatest, excelUrl }
   const [errorMsg, setErrorMsg]                   = useState<string | null>(null);
   const [isPending, startTransition]      = useTransition();
 
-  // --- Excel ---
+  // --- Excel: append ---
   const [showConfirmModal, setShowConfirmModal] = useState(false);
   const [excelStatus, setExcelStatus]           = useState<'idle' | 'pending' | 'ok' | 'error'>('idle');
   const [excelError, setExcelError]             = useState<string | null>(null);
+
+  // --- Excel: sync ---
+  const [syncPending, setSyncPending] = useState(false);
+  const [syncMsg, setSyncMsg]         = useState<string | null>(null);
+  const [syncIsError, setSyncIsError] = useState(false);
 
   // --- Grid ---
   const [logs, setLogs]             = useState<LogEntry[]>(initialLogs);
@@ -304,6 +310,28 @@ export default function MainForm({ areas, initialLogs, initialLatest, excelUrl }
     return `${tipoLabel} / A. ${areaCorta}`;
   }
 
+  async function handleSync() {
+    if (syncPending) return;
+    setSyncPending(true);
+    setSyncMsg(null);
+    setSyncIsError(false);
+    const result = await syncFromExcel();
+    setSyncPending(false);
+    if (result.success) {
+      const msg = result.updated > 0
+        ? `${result.updated} área${result.updated !== 1 ? 's' : ''} actualizada${result.updated !== 1 ? 's' : ''} desde Excel.`
+        : 'BD ya sincronizada con Excel.';
+      setSyncMsg(msg);
+      setSyncIsError(false);
+      const latest = await getLatestPerArea();
+      setLatestPerArea(latest);
+    } else {
+      setSyncMsg(result.error ?? 'Error al sincronizar.');
+      setSyncIsError(true);
+    }
+    setTimeout(() => setSyncMsg(null), 5000);
+  }
+
   async function handleDelete(log: LogEntry) {
     const ok = window.confirm(
       `¿Eliminar el consecutivo "${log.codigo_generado}"?\n\nEsta acción no se puede deshacer.`
@@ -514,14 +542,43 @@ export default function MainForm({ areas, initialLogs, initialLatest, excelUrl }
 
           {/* ── Panel: Últimos por área ── */}
           <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
-            <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
-              <h3 className="text-xs font-semibold text-slate-600 uppercase tracking-wide">
-                Últimos Consecutivos
-              </h3>
-              <span className="flex items-center gap-1.5 text-xs text-emerald-600">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                En vivo
-              </span>
+            <div className="border-b border-slate-100">
+              <div className="px-4 py-3 flex items-center justify-between">
+                <h3 className="text-xs font-semibold text-slate-600 uppercase tracking-wide">
+                  Últimos Consecutivos
+                </h3>
+                <div className="flex items-center gap-2">
+                  {excelConfigured && (
+                    <button
+                      onClick={handleSync}
+                      disabled={syncPending}
+                      title="Sincronizar consecutivos desde Excel"
+                      className="flex items-center gap-1 text-xs text-slate-400 hover:text-indigo-600
+                                 disabled:text-slate-300 transition-colors focus:outline-none"
+                    >
+                      <svg className={`w-3.5 h-3.5 ${syncPending ? 'animate-spin' : ''}`}
+                           fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                          d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                      </svg>
+                      <span className="hidden sm:inline">Sync Excel</span>
+                    </button>
+                  )}
+                  <span className="flex items-center gap-1.5 text-xs text-emerald-600">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                    En vivo
+                  </span>
+                </div>
+              </div>
+              {syncMsg && (
+                <div className={`px-4 py-2 text-xs border-t ${
+                  syncIsError
+                    ? 'bg-amber-50 text-amber-700 border-amber-200'
+                    : 'bg-indigo-50 text-indigo-700 border-indigo-200'
+                }`}>
+                  {syncMsg}
+                </div>
+              )}
             </div>
 
             <ul className="divide-y divide-slate-100">

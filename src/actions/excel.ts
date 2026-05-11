@@ -1,5 +1,8 @@
 'use server';
 
+import { revalidatePath } from 'next/cache';
+import { createServerClient } from '@/lib/supabase';
+
 // ── Token cache (se renueva automáticamente antes de expirar) ──
 let _cachedToken: { token: string; expiresAt: number } | null = null;
 
@@ -148,13 +151,22 @@ async function gfetch(
   });
 }
 
-// ── Acción principal ──────────────────────────────────────────
+// ── Helper: obtiene el workbook base URL ──────────────────────
+function hasExcelConfig() {
+  return !!(
+    (process.env.EXCEL_SHAREPOINT_URL || (process.env.EXCEL_DRIVE_ID && process.env.EXCEL_ITEM_ID)) &&
+    process.env.MICROSOFT_TENANT_ID
+  );
+}
+
+// ── Acción: agregar consecutivo al Excel ──────────────────────
 export async function appendConsecutiveToExcel(
   consecutive: string
 ): Promise<{ success: boolean; error?: string }> {
-  const shareUrl = process.env.EXCEL_SHAREPOINT_URL;
-  if (!shareUrl)                          return { success: false, error: 'EXCEL_SHAREPOINT_URL no configurado.' };
-  if (!process.env.MICROSOFT_TENANT_ID)  return { success: false, error: 'Credenciales de Microsoft no configuradas.' };
+  const shareUrl     = process.env.EXCEL_SHAREPOINT_URL ?? '';
+  const hasDirectIds = !!(process.env.EXCEL_DRIVE_ID && process.env.EXCEL_ITEM_ID);
+  if (!shareUrl && !hasDirectIds) return { success: false, error: 'EXCEL_SHAREPOINT_URL no configurado.' };
+  if (!process.env.MICROSOFT_TENANT_ID) return { success: false, error: 'Credenciales de Microsoft no configuradas.' };
 
   try {
     const token = await getGraphToken();
@@ -167,7 +179,7 @@ export async function appendConsecutiveToExcel(
     if (!sessRes.ok) throw new Error(`Sesión: ${await sessRes.text()}`);
     const { id: sessionId } = await sessRes.json() as { id: string };
 
-    // 2. Obtener nombre de la primera hoja si no está configurado
+    // 2. Nombre de la primera hoja si no está configurado
     let wsName = process.env.EXCEL_WORKSHEET_NAME ?? '';
     if (!wsName) {
       const sheetsRes = await gfetch(token, 'GET', `${base}/worksheets`, sessionId);
@@ -179,7 +191,7 @@ export async function appendConsecutiveToExcel(
     const column = process.env.EXCEL_COLUMN ?? 'A';
     const wsEnc  = encodeURIComponent(wsName);
 
-    // 3. Obtener rango utilizado para calcular la siguiente fila libre
+    // 3. Fila libre siguiente
     const usedRes = await gfetch(token, 'GET', `${base}/worksheets/${wsEnc}/usedRange`, sessionId);
     let nextRow = 2;
     if (usedRes.ok) {
@@ -189,7 +201,7 @@ export async function appendConsecutiveToExcel(
 
     const cell = `${column}${nextRow}`;
 
-    // 4. Escribir el valor
+    // 4. Escribir valor
     const valRes = await gfetch(
       token, 'PATCH',
       `${base}/worksheets/${wsEnc}/range(address='${cell}')`,
@@ -198,23 +210,31 @@ export async function appendConsecutiveToExcel(
     );
     if (!valRes.ok) throw new Error(`Valor: ${await valRes.text()}`);
 
-    // 5. Fondo azul (#4472C4 — azul estándar de Excel)
+    // 5. Color de fondo (#8EA9DB — azul claro igual al resto de la columna)
     await gfetch(
       token, 'PATCH',
       `${base}/worksheets/${wsEnc}/range(address='${cell}')/format/fill`,
       sessionId,
-      { color: '#4472C4' }
+      { color: '#8EA9DB' }
     );
 
-    // 6. Fuente blanca y negrita para legibilidad
+    // 6. Fuente negra, sin negrita
     await gfetch(
       token, 'PATCH',
       `${base}/worksheets/${wsEnc}/range(address='${cell}')/format/font`,
       sessionId,
-      { color: '#FFFFFF', bold: true }
+      { color: '#000000', bold: false }
     );
 
-    // 7. Cerrar sesión
+    // 7. Alineación centrada
+    await gfetch(
+      token, 'PATCH',
+      `${base}/worksheets/${wsEnc}/range(address='${cell}')/format`,
+      sessionId,
+      { horizontalAlignment: 'Center' }
+    );
+
+    // 8. Cerrar sesión
     await gfetch(token, 'POST', `${base}/closeSession`, sessionId);
 
     return { success: true };
@@ -222,5 +242,120 @@ export async function appendConsecutiveToExcel(
     const msg = err instanceof Error ? err.message : String(err);
     console.error('[appendConsecutiveToExcel]', msg);
     return { success: false, error: msg };
+  }
+}
+
+// ── Acción: sincronizar BD desde Excel ───────────────────────
+// Lee la columna configurada, detecta el máximo numero_secuencial por
+// prefijo, e inserta una entrada semilla en consecutives_log para que
+// generate_consecutive continúe desde el número correcto.
+export async function syncFromExcel(): Promise<{
+  success: boolean;
+  updated: number;
+  skipped: number;
+  error?: string;
+}> {
+  if (!hasExcelConfig()) {
+    return { success: false, updated: 0, skipped: 0, error: 'Excel no configurado.' };
+  }
+
+  try {
+    const shareUrl = process.env.EXCEL_SHAREPOINT_URL ?? '';
+    const token    = await getGraphToken();
+    const { driveId, itemId } = await getDriveItem(token, shareUrl);
+    const base     = `https://graph.microsoft.com/v1.0/drives/${driveId}/items/${itemId}/workbook`;
+
+    // Sesión de solo lectura
+    const sessRes = await gfetch(token, 'POST', `${base}/createSession`, undefined, { persistChanges: false });
+    if (!sessRes.ok) throw new Error(`Sesión: ${await sessRes.text()}`);
+    const { id: sessionId } = await sessRes.json() as { id: string };
+
+    // Nombre de la hoja
+    let wsName = process.env.EXCEL_WORKSHEET_NAME ?? '';
+    if (!wsName) {
+      const sheetsRes = await gfetch(token, 'GET', `${base}/worksheets`, sessionId);
+      if (!sheetsRes.ok) throw new Error(`Hojas: ${await sheetsRes.text()}`);
+      const sheets = await sheetsRes.json() as { value: { name: string }[] };
+      wsName = sheets.value[0]?.name ?? 'Sheet1';
+    }
+    const wsEnc  = encodeURIComponent(wsName);
+    const colIdx = (process.env.EXCEL_COLUMN ?? 'A').toUpperCase().charCodeAt(0) - 65; // A=0
+
+    // Leer todos los valores del rango utilizado
+    const rangeRes = await gfetch(token, 'GET',
+      `${base}/worksheets/${wsEnc}/usedRange?$select=values`, sessionId);
+    if (!rangeRes.ok) throw new Error(`Lectura: ${await rangeRes.text()}`);
+    const { values } = await rangeRes.json() as { values: (string | number | null)[][] };
+
+    await gfetch(token, 'POST', `${base}/closeSession`, sessionId);
+
+    // Parsear: máximo numero_secuencial por prefijo
+    // Formato esperado: {prefijo}{4+ dígitos}  Ej: "P 05-0229", "AL-0003"
+    // Entradas malformadas (espacios extra, sufijos, sin guión) se ignoran.
+    const maxByPrefix = new Map<string, number>();
+    for (const row of values) {
+      const raw = String(row[colIdx] ?? '').trim();
+      if (!raw) continue;
+      const match = raw.match(/^(.+?-)(\d{4,})$/);
+      if (!match) continue;
+      const prefix = match[1];
+      const num    = parseInt(match[2], 10);
+      if (num > (maxByPrefix.get(prefix) ?? -1)) maxByPrefix.set(prefix, num);
+    }
+
+    if (maxByPrefix.size === 0) {
+      return { success: true, updated: 0, skipped: 0 };
+    }
+
+    // Obtener áreas de la BD
+    const supabase = createServerClient();
+    const clientId = process.env.CLIENT_ID!;
+    const { data: areas } = await supabase
+      .from('areas')
+      .select('id, prefijo')
+      .eq('client_id', clientId)
+      .eq('activo', true);
+
+    if (!areas?.length) throw new Error('Sin áreas en la base de datos.');
+
+    let updated = 0;
+    let skipped = 0;
+
+    for (const area of areas) {
+      const excelMax = maxByPrefix.get(area.prefijo);
+      if (excelMax === undefined) { skipped++; continue; }
+
+      // Máximo actual en BD para este área
+      const { data: topRow } = await supabase
+        .from('consecutives_log')
+        .select('numero_secuencial')
+        .eq('client_id', clientId)
+        .eq('area_id', area.id)
+        .order('numero_secuencial', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      const dbMax = (topRow as { numero_secuencial: number } | null)?.numero_secuencial ?? -1;
+
+      if (excelMax <= dbMax) { skipped++; continue; }
+
+      // Insertar entrada semilla: generate_consecutive continuará desde excelMax + 1
+      const codigo = area.prefijo + String(excelMax).padStart(4, '0');
+      await supabase.from('consecutives_log').insert({
+        client_id:         clientId,
+        area_id:           area.id,
+        codigo_generado:   codigo,
+        numero_secuencial: excelMax,
+        nombre_usuario:    'Sync Excel',
+      });
+      updated++;
+    }
+
+    revalidatePath('/');
+    return { success: true, updated, skipped };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error('[syncFromExcel]', msg);
+    return { success: false, updated: 0, skipped: 0, error: msg };
   }
 }

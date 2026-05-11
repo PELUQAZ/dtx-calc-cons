@@ -57,12 +57,18 @@ export default async function Home() {
     };
   });
 
+  const excelConfigured = !!(
+    (process.env.EXCEL_SHAREPOINT_URL || (process.env.EXCEL_DRIVE_ID && process.env.EXCEL_ITEM_ID)) &&
+    process.env.MICROSOFT_TENANT_ID
+  );
+
   return (
     <MainForm
       areas={areas}
       initialLogs={initialLogs}
       initialLatest={initialLatest as LatestByArea[]}
       excelUrl={process.env.EXCEL_SHAREPOINT_URL}
+      excelConfigured={excelConfigured}
     />
   );
 }
